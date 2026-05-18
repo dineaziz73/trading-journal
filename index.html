@@ -234,6 +234,8 @@ footer{margin-top:28px;padding-top:14px;border-top:1px solid var(--border);displ
   <button class="tab active" onclick="switchTab('journal',this)">📋 Journal</button>
   <button class="tab" onclick="switchTab('ajouter',this)">➕ Nouveau Trade</button>
   <button class="tab" onclick="switchTab('stats',this)">📊 Statistiques</button>
+  <button class="tab" onclick="switchTab('rapport',this)">📆 Rapport</button>
+  <button class="tab" onclick="switchTab('comparaison',this)">⚖️ Comparaison</button>
   <button class="tab" onclick="switchTab('calendrier',this)">📅 Calendrier</button>
   <button class="tab" onclick="switchTab('objectifs',this)">🎯 Objectifs</button>
 </div>
@@ -551,6 +553,55 @@ footer{margin-top:28px;padding-top:14px;border-top:1px solid var(--border);displ
   </div>
 </div>
 
+<!-- ══ RAPPORT ══ -->
+<div id="panel-rapport" class="panel">
+  <div id="tilt-banner" class="alert-banner" style="display:none;"></div>
+  <div class="card">
+    <div class="card-hd">
+      <div class="card-hd-l b">📆 Rapport hebdomadaire</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button onclick="prevWeek()" style="background:var(--s2);border:1px solid var(--border2);border-radius:7px;color:var(--muted);padding:5px 10px;cursor:pointer;font-size:13px;">‹</button>
+        <span id="week-label" style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text);white-space:nowrap;"></span>
+        <button onclick="nextWeek()" style="background:var(--s2);border:1px solid var(--border2);border-radius:7px;color:var(--muted);padding:5px 10px;cursor:pointer;font-size:13px;">›</button>
+      </div>
+    </div>
+    <div id="rapport-content"></div>
+  </div>
+</div>
+
+<!-- ══ COMPARAISON ══ -->
+<div id="panel-comparaison" class="panel">
+  <div class="card">
+    <div class="card-hd"><div class="card-hd-l y">⚖️ Comparer deux périodes</div></div>
+    <div class="form-grid-2" style="margin-bottom:20px;">
+      <div>
+        <div style="font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);margin-bottom:10px;">Période A</div>
+        <div class="inp-group" style="margin-bottom:10px;">
+          <label>Du</label>
+          <input type="date" id="cmp-a-start">
+        </div>
+        <div class="inp-group">
+          <label>Au</label>
+          <input type="date" id="cmp-a-end">
+        </div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--yellow);margin-bottom:10px;">Période B</div>
+        <div class="inp-group" style="margin-bottom:10px;">
+          <label>Du</label>
+          <input type="date" id="cmp-b-start">
+        </div>
+        <div class="inp-group">
+          <label>Au</label>
+          <input type="date" id="cmp-b-end">
+        </div>
+      </div>
+    </div>
+    <button class="btn-submit" onclick="runComparison()" style="margin-top:0;">⚖️ Comparer</button>
+  </div>
+  <div id="cmp-result" style="display:none;"></div>
+</div>
+
 <footer>
   <div class="fsig">
     <span>⚡ Propriété exclusive de</span>
@@ -603,6 +654,8 @@ function switchTab(tab,btn){
   if(tab==='stats')renderStats();
   if(tab==='calendrier')renderCalendar();
   if(tab==='objectifs'){loadGoals();renderGoals();}
+  if(tab==='rapport'){renderRapport();checkTilt();}
+  if(tab==='comparaison')initComparison();
 }
 
 // ══════════════════════════════════════
@@ -1066,6 +1119,275 @@ function renderGoals(){
     goalRow('🛡️ Limite perte journalière',todayPnl,-goals['g-daily-loss'],'$',true)+
     goalRow('📊 Trades aujourd\'hui',todayTrades.length,goals['g-max-trades'],'trades',false)+
     goalRow('🏆 Winrate mensuel cible',monthWR,goals['g-winrate'],'%',false);
+}
+
+// ══════════════════════════════════════
+// RAPPORT HEBDOMADAIRE
+// ══════════════════════════════════════
+let rapportWeekOffset = 0; // 0 = semaine en cours, -1 = semaine passée...
+
+function getWeekBounds(offset) {
+  const now = new Date();
+  const day = now.getDay(); // 0=dim, 1=lun...
+  const diffToMon = (day === 0 ? -6 : 1 - day);
+  const monday = new Date(now);
+  monday.setDate(now.getDate() + diffToMon + offset * 7);
+  monday.setHours(0,0,0,0);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  sunday.setHours(23,59,59,999);
+  return { start: monday, end: sunday };
+}
+
+function prevWeek() { rapportWeekOffset--; renderRapport(); }
+function nextWeek() { if(rapportWeekOffset < 0) { rapportWeekOffset++; renderRapport(); } }
+
+function renderRapport() {
+  const { start, end } = getWeekBounds(rapportWeekOffset);
+  const fmt = d => d.toLocaleDateString('fr-FR',{day:'2-digit',month:'short'});
+  document.getElementById('week-label').textContent = `${fmt(start)} → ${fmt(end)}`;
+
+  const weekTrades = trades.filter(t => {
+    if(!t.date) return false;
+    const d = new Date(t.date);
+    return d >= start && d <= end;
+  });
+
+  const s = calcStats(weekTrades);
+  const pc = s.totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  const ps = s.totalPnl >= 0 ? '+' : '';
+
+  // Best/worst trade
+  const best  = weekTrades.length ? weekTrades.reduce((a,b)=>(b.pnl||0)>(a.pnl||0)?b:a) : null;
+  const worst = weekTrades.length ? weekTrades.reduce((a,b)=>(b.pnl||0)<(a.pnl||0)?b:a) : null;
+
+  // Most used instrument
+  const instCount = {};
+  weekTrades.forEach(t => { instCount[t.instrument] = (instCount[t.instrument]||0) + 1; });
+  const topInst = Object.entries(instCount).sort((a,b)=>b[1]-a[1])[0];
+
+  // Error summary
+  const errCount = {};
+  weekTrades.filter(t=>t.result==='Loss').forEach(t=>(t.errors||[]).forEach(e=>{ errCount[e]=(errCount[e]||0)+1; }));
+  const topErr = Object.entries(errCount).sort((a,b)=>b[1]-a[1])[0];
+
+  // Best session
+  const sessions = ['Matin','Après-midi','Soir','Nuit'];
+  const sessStats = sessions.map(sess => {
+    const st = calcStats(weekTrades.filter(t=>t.session===sess));
+    return { sess, ...st };
+  }).filter(s=>s.total>0).sort((a,b)=>b.totalPnl-a.totalPnl);
+  const bestSess = sessStats[0];
+
+  if(!weekTrades.length) {
+    document.getElementById('rapport-content').innerHTML = `
+      <div class="empty-state"><div class="ei">📭</div><p>Aucun trade cette semaine.</p></div>`;
+    return;
+  }
+
+  document.getElementById('rapport-content').innerHTML = `
+    <!-- KPIs semaine -->
+    <div class="stats-grid" style="margin-bottom:16px;">
+      <div class="stat-card"><div class="stat-label">Trades</div><div class="stat-val accent">${s.total}</div><div class="stat-sub">${s.wins}W · ${s.losses}L · ${s.bes}BE</div></div>
+      <div class="stat-card"><div class="stat-label">Winrate</div><div class="stat-val ${s.winrate>=50?'green':'red'}">${s.winrate}%</div><div class="stat-sub">Objectif 50%+</div></div>
+      <div class="stat-card"><div class="stat-label">P&L Semaine</div><div class="stat-val" style="color:${pc}">${ps}$${s.totalPnl.toFixed(2)}</div><div class="stat-sub">Moy. ${ps}$${s.avgPnl.toFixed(2)}/trade</div></div>
+      <div class="stat-card"><div class="stat-label">R:R Moyen</div><div class="stat-val blue">1:${s.avgRR}</div><div class="stat-sub">Série : ${s.streak||'—'}</div></div>
+    </div>
+
+    <!-- Highlights -->
+    <div class="form-grid-2" style="margin-bottom:16px;">
+      <div class="card" style="margin-bottom:0;">
+        <div class="card-hd"><div class="card-hd-l g">✅ Points positifs</div></div>
+        ${best?`<div class="stat-row"><span class="stat-row-label">Meilleur trade</span><span class="stat-row-val" style="color:var(--green)">+$${(best.pnl||0).toFixed(2)} — ${best.instrument}</span></div>`:''}
+        ${bestSess?`<div class="stat-row"><span class="stat-row-label">Meilleure session</span><span class="stat-row-val" style="color:var(--green)">${bestSess.sess} (${bestSess.winrate}% WR)</span></div>`:''}
+        ${topInst?`<div class="stat-row"><span class="stat-row-label">Instrument favori</span><span class="stat-row-val">${topInst[0]} (${topInst[1]} trades)</span></div>`:''}
+      </div>
+      <div class="card" style="margin-bottom:0;">
+        <div class="card-hd"><div class="card-hd-l r">⚠️ Points à améliorer</div></div>
+        ${worst&&worst.pnl<0?`<div class="stat-row"><span class="stat-row-label">Pire trade</span><span class="stat-row-val" style="color:var(--red)">$${(worst.pnl||0).toFixed(2)} — ${worst.instrument}</span></div>`:'<div class="stat-row"><span class="stat-row-label">Pire trade</span><span class="stat-row-val" style="color:var(--green)">Aucune grosse perte 🎉</span></div>'}
+        ${topErr?`<div class="stat-row"><span class="stat-row-label">Erreur principale</span><span class="stat-row-val" style="color:var(--red)">${topErr[0]} (${topErr[1]}x)</span></div>`:'<div class="stat-row"><span class="stat-row-label">Erreurs</span><span class="stat-row-val" style="color:var(--green)">Aucune erreur notée 👍</span></div>'}
+        ${s.winrate<50?`<div class="stat-row"><span class="stat-row-label">Winrate</span><span class="stat-row-val" style="color:var(--red)">Sous 50% — à améliorer</span></div>`:''}
+      </div>
+    </div>
+
+    <!-- Leçon de la semaine -->
+    <div style="background:var(--s2);border:1px solid var(--border2);border-left:3px solid var(--accent);border-radius:0 12px 12px 0;padding:16px 20px;">
+      <div style="font-size:10px;font-weight:700;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:8px;">💡 Résumé de la semaine</div>
+      <div style="font-size:14px;color:var(--text);line-height:1.7;">
+        ${s.totalPnl>=0
+          ? `Bonne semaine avec <strong style="color:var(--green)">${ps}$${s.totalPnl.toFixed(2)}</strong> de P&L sur ${s.total} trades. Winrate de <strong>${s.winrate}%</strong>${topErr?` — surveille l'erreur "${topErr[0]}" qui revient ${topErr[1]} fois`:''}.`
+          : `Semaine difficile avec <strong style="color:var(--red)">$${s.totalPnl.toFixed(2)}</strong> de P&L sur ${s.total} trades. Analyse tes ${s.losses} losses${topErr?` — "${topErr[0]}" semble être le problème principal`:''} et revois ta stratégie.`
+        }
+      </div>
+    </div>
+  `;
+}
+
+// ══════════════════════════════════════
+// TILT DETECTOR
+// ══════════════════════════════════════
+function checkTilt() {
+  const banner = document.getElementById('tilt-banner');
+  if(!banner || trades.length < 2) { if(banner) banner.style.display='none'; return; }
+
+  // Check last N trades for consecutive losses
+  let streak = 0;
+  for(const t of trades) {
+    if(t.result === 'Loss') streak++;
+    else break;
+  }
+
+  if(streak >= 3) {
+    banner.className = 'alert-banner danger';
+    banner.innerHTML = `🚨 <strong>${streak} losses consécutifs détectés !</strong> Arrête de trader maintenant. Analyse tes erreurs avant de reprendre.`;
+    banner.style.display = 'block';
+  } else if(streak === 2) {
+    banner.className = 'alert-banner warn';
+    banner.innerHTML = `⚠️ <strong>2 losses consécutifs.</strong> Fais une pause, reprends-toi avant le prochain trade.`;
+    banner.style.display = 'block';
+  } else {
+    banner.style.display = 'none';
+  }
+}
+
+// Also show tilt in journal tab
+function checkAlerts(){
+  const g=goals;
+  const today=new Date().toISOString().slice(0,10);
+  const todayTrades=trades.filter(t=>t.date&&t.date.startsWith(today));
+  const todayPnl=todayTrades.reduce((s,t)=>s+(t.pnl||0),0);
+  const banner=document.getElementById('alert-banner');
+  if(!banner) return;
+  banner.style.display='none';
+
+  // Tilt check (priority)
+  let lossStreak = 0;
+  for(const t of trades) { if(t.result==='Loss') lossStreak++; else break; }
+  if(lossStreak >= 3) {
+    banner.className='alert-banner danger';
+    banner.innerHTML=`🚨 <strong>${lossStreak} losses consécutifs !</strong> Stop trading — analyse tes erreurs avant de reprendre.`;
+    banner.style.display='block'; return;
+  }
+  if(lossStreak === 2) {
+    banner.className='alert-banner warn';
+    banner.innerHTML=`⚠️ <strong>2 losses consécutifs.</strong> Pause recommandée avant le prochain trade.`;
+    banner.style.display='block'; return;
+  }
+
+  if(g['g-daily-loss']&&todayPnl<=-parseFloat(g['g-daily-loss'])){
+    banner.className='alert-banner danger';
+    banner.innerHTML=`🚨 Limite de perte journalière atteinte : $${todayPnl.toFixed(2)} / -$${g['g-daily-loss']}. Arrête de trader aujourd'hui.`;
+    banner.style.display='block'; return;
+  }
+  if(g['g-max-trades']&&todayTrades.length>=parseInt(g['g-max-trades'])){
+    banner.className='alert-banner warn';
+    banner.innerHTML=`⚠️ Nombre maximum de trades atteint : ${todayTrades.length}/${g['g-max-trades']} trades aujourd'hui.`;
+    banner.style.display='block'; return;
+  }
+  if(g['g-daily-loss']&&todayPnl<=-parseFloat(g['g-daily-loss'])*0.7){
+    banner.className='alert-banner warn';
+    banner.innerHTML=`⚠️ Tu approches ta limite journalière : $${todayPnl.toFixed(2)} / -$${g['g-daily-loss']}.`;
+    banner.style.display='block';
+  }
+}
+
+// ══════════════════════════════════════
+// COMPARAISON DE PÉRIODES
+// ══════════════════════════════════════
+function initComparison() {
+  // Default: current month vs previous month
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth();
+  const pad = s => String(s).padStart(2,'0');
+
+  if(!document.getElementById('cmp-a-start').value) {
+    // Period A = this month
+    document.getElementById('cmp-a-start').value = `${y}-${pad(m+1)}-01`;
+    document.getElementById('cmp-a-end').value   = `${y}-${pad(m+1)}-${pad(now.getDate())}`;
+    // Period B = last month
+    const lastMonth = new Date(y, m, 0);
+    const lm = lastMonth.getMonth()+1, ly = lastMonth.getFullYear();
+    document.getElementById('cmp-b-start').value = `${ly}-${pad(lm)}-01`;
+    document.getElementById('cmp-b-end').value   = `${ly}-${pad(lm)}-${pad(lastMonth.getDate())}`;
+  }
+}
+
+function runComparison() {
+  const aStart = new Date(document.getElementById('cmp-a-start').value);
+  const aEnd   = new Date(document.getElementById('cmp-a-end').value); aEnd.setHours(23,59,59);
+  const bStart = new Date(document.getElementById('cmp-b-start').value);
+  const bEnd   = new Date(document.getElementById('cmp-b-end').value); bEnd.setHours(23,59,59);
+
+  if(!aStart||!aEnd||!bStart||!bEnd||isNaN(aStart)) { alert('Remplis les 4 dates.'); return; }
+
+  const tradesA = trades.filter(t=>{ const d=new Date(t.date); return d>=aStart&&d<=aEnd; });
+  const tradesB = trades.filter(t=>{ const d=new Date(t.date); return d>=bStart&&d<=bEnd; });
+  const sA = calcStats(tradesA), sB = calcStats(tradesB);
+
+  const fmt = d => d.toLocaleDateString('fr-FR',{day:'2-digit',month:'short',year:'2-digit'});
+  const labelA = `${fmt(aStart)} → ${fmt(aEnd)}`;
+  const labelB = `${fmt(bStart)} → ${fmt(bEnd)}`;
+
+  function cmpRow(label, valA, valB, higherIsBetter=true, unit='') {
+    const numA = parseFloat(valA), numB = parseFloat(valB);
+    let iconA='', iconB='';
+    if(!isNaN(numA)&&!isNaN(numB)&&numA!==numB) {
+      const aBetter = higherIsBetter ? numA>numB : numA<numB;
+      iconA = aBetter ? '✅' : '❌';
+      iconB = !aBetter ? '✅' : '❌';
+    }
+    return `<div class="stat-row">
+      <span class="stat-row-label">${label}</span>
+      <span class="stat-row-val" style="color:var(--accent)">${iconA} ${valA}${unit}</span>
+      <span class="stat-row-val" style="color:var(--yellow)">${iconB} ${valB}${unit}</span>
+    </div>`;
+  }
+
+  const pnlDiff = sA.totalPnl - sB.totalPnl;
+  const pnlDiffColor = pnlDiff >= 0 ? 'var(--green)' : 'var(--red)';
+  const pnlDiffSign = pnlDiff >= 0 ? '+' : '';
+
+  document.getElementById('cmp-result').style.display = 'block';
+  document.getElementById('cmp-result').innerHTML = `
+    <div class="card">
+      <div class="card-hd">
+        <div class="card-hd-l">Résultat de la comparaison</div>
+        <div style="font-size:12px;font-weight:700;color:${pnlDiffColor};">
+          Période A ${pnlDiff>=0?'surperforme':'sous-performe'} de ${pnlDiffSign}$${Math.abs(pnlDiff).toFixed(2)}
+        </div>
+      </div>
+
+      <!-- Headers -->
+      <div class="stat-row" style="background:transparent;border:none;padding:4px 13px;">
+        <span class="stat-row-label"></span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);">Période A</span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--yellow);">Période B</span>
+      </div>
+      <div class="stat-row" style="background:transparent;border-color:var(--border);padding:6px 13px;margin-bottom:8px;">
+        <span class="stat-row-label" style="font-size:10px;"></span>
+        <span style="font-size:10px;color:var(--muted);">${labelA}</span>
+        <span style="font-size:10px;color:var(--muted);">${labelB}</span>
+      </div>
+
+      ${cmpRow('Total trades', sA.total, sB.total, true)}
+      ${cmpRow('Winrate', sA.winrate+'%', sB.winrate+'%', true)}
+      ${cmpRow('P&L Total', (sA.totalPnl>=0?'+':'')+sA.totalPnl.toFixed(2), (sB.totalPnl>=0?'+':'')+sB.totalPnl.toFixed(2), true)}
+      ${cmpRow('P&L Moyen/trade', (sA.avgPnl>=0?'+':'')+sA.avgPnl.toFixed(2), (sB.avgPnl>=0?'+':'')+sB.avgPnl.toFixed(2), true)}
+      ${cmpRow('R:R Moyen', '1:'+sA.avgRR, '1:'+sB.avgRR, true)}
+      ${cmpRow('Wins', sA.wins, sB.wins, true)}
+      ${cmpRow('Losses', sA.losses, sB.losses, false)}
+
+      <!-- Conclusion -->
+      <div style="margin-top:16px;background:var(--s2);border:1px solid var(--border2);border-left:3px solid ${pnlDiffColor};border-radius:0 12px 12px 0;padding:14px 18px;">
+        <div style="font-size:10px;font-weight:700;letter-spacing:2px;color:${pnlDiffColor};text-transform:uppercase;margin-bottom:6px;">💡 Conclusion</div>
+        <div style="font-size:13px;color:var(--text);line-height:1.7;">
+          ${pnlDiff>=0
+            ? `La période A est <strong style="color:var(--green)">meilleure</strong> : +$${Math.abs(pnlDiff).toFixed(2)} de différence, winrate ${sA.winrate>=sB.winrate?'supérieur ou égal':'inférieur'} (${sA.winrate}% vs ${sB.winrate}%).`
+            : `La période B est <strong style="color:var(--yellow)">meilleure</strong> : $${Math.abs(pnlDiff).toFixed(2)} de différence. Analyse ce qui était différent dans ta période B.`
+          }
+        </div>
+      </div>
+    </div>`;
 }
 
 // ══════════════════════════════════════

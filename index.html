@@ -347,8 +347,8 @@ footer{margin-top:28px;padding-top:14px;border-top:1px solid var(--border);displ
         <option value="">Toutes sessions</option>
       </select>
       <button class="btn-export" onclick="exportCSV()">⬇ Export CSV</button>
-      <button class="btn-export" onclick="document.getElementById('mt5-import-file').click()" style="background:rgba(61,139,255,0.1);border-color:rgba(61,139,255,0.3);color:#3d8bff;">📥 Import MT5</button>
-      <input type="file" id="mt5-import-file" accept=".csv,.htm,.html" style="display:none" onchange="importMT5(this)">
+      <button class="btn-export" onclick="document.getElementById('mt5-import-file').click()" style="background:rgba(61,139,255,0.1);border-color:rgba(61,139,255,0.3);color:#3d8bff;">📥 Importer CSV</button>
+      <input type="file" id="mt5-import-file" accept=".csv" style="display:none" onchange="importCSV(this)">
     </div>
     <div style="overflow-x:auto;">
       <table class="trade-table">
@@ -1150,101 +1150,151 @@ function showPhoto(id){
 // ══════════════════════════════════════
 // IMPORT MT5
 // ══════════════════════════════════════
-function importMT5(input){
+function importCSV(input){
   if(!input.files||!input.files[0]) return;
   const file = input.files[0];
   const reader = new FileReader();
   reader.onload = e => {
     const text = e.target.result;
-    let imported = 0, errors = 0;
-
-    // MT5 exports CSV with semicolons or commas
-    // Format: Ticket;Time;Type;Size;Symbol;Price;S/L;T/P;Time;Price;Profit;...
     const lines = text.split(/[\r\n]+/).filter(l=>l.trim());
+    if(lines.length < 2){ alert('Fichier vide ou invalide.'); return; }
+
     const delim = text.includes(';') ? ';' : ',';
+    const rawHeaders = lines[0].split(delim).map(h=>h.trim().replace(/^"|"$/g,'').toLowerCase());
 
-    // Find header row
-    let headerIdx = -1;
-    for(let i=0;i<Math.min(20,lines.length);i++){
-      const l = lines[i].toLowerCase();
-      if(l.includes('ticket')||l.includes('symbol')||l.includes('profit')){
-        headerIdx = i; break;
-      }
+    // ── Detect format: TradingJournal Pro own CSV ──
+    const isJournalFormat = rawHeaders.includes('date') &&
+      rawHeaders.includes('instrument') && rawHeaders.includes('résultat');
+
+    // ── Detect MT5 format ──
+    const isMT5Format = rawHeaders.some(h=>h.includes('ticket')) ||
+      rawHeaders.some(h=>h.includes('symbol')) ||
+      rawHeaders.some(h=>h.includes('profit'));
+
+    if(!isJournalFormat && !isMT5Format){
+      alert("Format non reconnu.\n\nPour importer tes trades :\n→ Va dans l'onglet Journal\n→ Clique sur Export CSV\n→ Envoie ce fichier sur l'autre téléphone\n→ Clique sur Importer CSV et sélectionne le fichier.");
+      input.value=''; return;
     }
-    if(headerIdx<0){ alert('Format MT5 non reconnu. Exporte depuis Historique → Clic droit → Enregistrer sous (CSV).'); return; }
 
-    const headers = lines[headerIdx].split(delim).map(h=>h.trim().toLowerCase().replace(/"/g,''));
-    const getCol = (row, ...names) => {
-      for(const n of names){
-        const idx = headers.findIndex(h=>h.includes(n));
-        if(idx>=0) return (row[idx]||'').replace(/"/g,'').trim();
+    let imported = 0;
+
+    if(isJournalFormat){
+      // ── Import TradingJournal Pro CSV ──
+      // Headers: Date,Instrument,Direction,Lot,Signal,Score,R:R,Session,Résultat,P&L,Erreurs,Notes
+      const hi = {}; rawHeaders.forEach((h,i)=>hi[h]=i);
+      const get = (row,key) => (row[hi[key]]||'').replace(/^"|"$/g,'').trim();
+
+      for(let i=1;i<lines.length;i++){
+        const row = lines[i].split(delim);
+        if(row.length < 5) continue;
+
+        const dateVal   = get(row,'date');
+        const inst      = get(row,'instrument');
+        const direction = get(row,'direction')||'Buy';
+        const lot       = parseFloat(get(row,'lot'))||0.01;
+        const signal    = get(row,'signal');
+        const score     = get(row,'score');
+        const rr        = get(row,'r:r')||'—';
+        const session   = get(row,'session');
+        const result    = get(row,'résultat')||get(row,'resultat');
+        const pnl       = parseFloat(get(row,'p&l'))||0;
+        const errStr    = get(row,'erreurs');
+        const notes     = get(row,'notes');
+        const strategy  = get(row,'stratégie')||get(row,'strategie')||'';
+
+        if(!inst||!dateVal) continue;
+
+        // Skip exact duplicates
+        const isDup = trades.some(t=>
+          t.instrument===inst &&
+          t.date===dateVal &&
+          Math.abs((t.pnl||0)-pnl)<0.001
+        );
+        if(isDup) continue;
+
+        trades.push({
+          id: Date.now() + i + Math.random(),
+          date: dateVal,
+          instrument: inst,
+          direction, lot, signal, score, rr, session, result, pnl,
+          errors: errStr ? errStr.split('|').filter(Boolean) : [],
+          notes, photo: null,
+          strategy
+        });
+        imported++;
       }
-      return '';
-    };
 
-    for(let i=headerIdx+1;i<lines.length;i++){
-      const row = lines[i].split(delim).map(c=>c.replace(/"/g,'').trim());
-      if(row.length < 5) continue;
-
-      const type   = getCol(row,'type','action');
-      const symbol = getCol(row,'symbol','instrument');
-      const profit = parseFloat(getCol(row,'profit','p&l','pnl','gain'))||0;
-      const size   = parseFloat(getCol(row,'size','volume','lot'))||0.01;
-      const time   = getCol(row,'time','date','open time');
-
-      if(!symbol||(!type&&!profit)) continue;
-      if(type.toLowerCase().includes('balance')||type.toLowerCase().includes('deposit')) continue;
-
-      const direction = type.toLowerCase().includes('sell')||type.toLowerCase().includes('short') ? 'Sell' : 'Buy';
-      const result    = profit > 0 ? 'Win' : profit < 0 ? 'Loss' : 'BE';
-
-      // Parse date
-      let dateStr = '';
-      try {
-        const d = new Date(time);
-        if(!isNaN(d)) dateStr = d.toISOString().slice(0,16);
-        else dateStr = new Date().toISOString().slice(0,16);
-      } catch(e){ dateStr = new Date().toISOString().slice(0,16); }
-
-      // Check duplicate (same time + symbol + profit)
-      const isDup = trades.some(t=>t.instrument===symbol&&Math.abs(t.pnl-profit)<0.001&&t.date===dateStr);
-      if(isDup) continue;
-
-      const trade = {
-        id: Date.now() + i,
-        date: dateStr,
-        instrument: symbol,
-        direction, lot: size,
-        signal: '', score: '', rr: '—',
-        result, pnl: profit,
-        errors: [], notes: 'Importé depuis MT5',
-        photo: null, session: getSession(dateStr),
-        strategy: ''
+    } else {
+      // ── Import MT5 CSV (PC only) ──
+      const headers = rawHeaders;
+      const getCol = (row,...names)=>{
+        for(const n of names){
+          const idx=headers.findIndex(h=>h.includes(n));
+          if(idx>=0) return (row[idx]||'').replace(/^"|"$/g,'').trim();
+        }
+        return '';
       };
-      trades.unshift(trade);
-      imported++;
+      for(let i=1;i<lines.length;i++){
+        const row=lines[i].split(delim).map(c=>c.replace(/^"|"$/g,'').trim());
+        if(row.length<5) continue;
+        const type=getCol(row,'type','action');
+        const symbol=getCol(row,'symbol','instrument');
+        const profit=parseFloat(getCol(row,'profit','p&l','pnl','gain'))||0;
+        const size=parseFloat(getCol(row,'size','volume','lot'))||0.01;
+        const time=getCol(row,'time','date','open time');
+        if(!symbol) continue;
+        if(type.toLowerCase().includes('balance')||type.toLowerCase().includes('deposit')) continue;
+        const direction=type.toLowerCase().includes('sell')?'Sell':'Buy';
+        const result=profit>0?'Win':profit<0?'Loss':'BE';
+        let dateStr='';
+        try{ const d=new Date(time); dateStr=isNaN(d)?new Date().toISOString().slice(0,16):d.toISOString().slice(0,16); }
+        catch(e){ dateStr=new Date().toISOString().slice(0,16); }
+        const isDup=trades.some(t=>t.instrument===symbol&&Math.abs(t.pnl-profit)<0.001&&t.date===dateStr);
+        if(isDup) continue;
+        trades.push({id:Date.now()+i,date:dateStr,instrument:symbol,direction,lot:size,
+          signal:'',score:'',rr:'—',result,pnl:profit,errors:[],
+          notes:'Importé depuis MT5',photo:null,session:getSession(dateStr),strategy:''});
+        imported++;
+      }
     }
+
+    // Sort by date descending after import
+    trades.sort((a,b)=>new Date(b.date)-new Date(a.date));
+    localStorage.setItem('tj_trades',JSON.stringify(trades));
+    renderKPI(); renderTable(); updateInstFilter();
 
     if(imported>0){
-      localStorage.setItem('tj_trades', JSON.stringify(trades));
-      renderKPI(); renderTable();
-      alert(`✅ ${imported} trade(s) importé(s) depuis MT5 !${errors>0?' '+errors+' ignoré(s).':''}`);
+      alert('✅ '+imported+' trade(s) importé(s) avec succès !');
     } else {
-      alert('Aucun trade importé. Vérifie que le fichier est bien un export MT5 CSV.');
+      alert('Aucun nouveau trade importé.\nTous les trades de ce fichier existent déjà dans ton journal.');
     }
     input.value='';
   };
-  reader.readAsText(file);
+  reader.readAsText(file, 'UTF-8');
 }
 
 function exportCSV(){
   if(!trades.length){alert('Aucun trade.');return;}
-  const h=['Date','Instrument','Direction','Lot','Signal','Score','R:R','Session','Résultat','P&L','Erreurs','Notes'];
-  const r=trades.map(t=>[t.date,t.instrument,t.direction,t.lot,t.signal,t.score,t.rr,t.session,t.result,t.pnl,(t.errors||[]).join('|'),`"${(t.notes||'').replace(/"/g,'""')}"`].join(','));
-  const csv=[h.join(','),...r].join('\n');
+  const h=['Date','Instrument','Direction','Lot','Signal','Score','R:R','Session','Résultat','P&L','Erreurs','Notes','Stratégie'];
+  const r=trades.map(t=>[
+    t.date,
+    t.instrument,
+    t.direction,
+    t.lot,
+    (t.signal||'').replace(/,/g,';'),
+    t.score,
+    t.rr,
+    (t.session||'').replace(/,/g,';'),
+    t.result,
+    t.pnl,
+    (t.errors||[]).join('|'),
+    '"'+(t.notes||'').replace(/"/g,'""')+'"',
+    (t.strategy||'').replace(/,/g,';')
+  ].join(','));
+  const csv='﻿'+[h.join(','),...r].join('\n');
   const a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
-  a.download=`trades_${new Date().toISOString().slice(0,10)}.csv`;
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  a.download='TradingJournal_'+new Date().toISOString().slice(0,10)+'.csv';
   a.click();
 }
 
@@ -1430,12 +1480,14 @@ function renderPerfSessions(){
     const t=trades.filter(x=>x.session===sess);
     const s=calcStats(t);
     const pc=s.totalPnl>=0?'var(--green)':'var(--red)';
-    return `<div class="card" style="margin-bottom:0">
-      <div style="font-size:16px;margin-bottom:8px;">${icons[sess]} <strong>${sess}</strong></div>
-      <div class="stat-row"><span class="stat-row-label">Trades</span><span class="stat-row-val">${s.total}</span></div>
-      <div class="stat-row"><span class="stat-row-label">Winrate</span><span class="stat-row-val" style="color:${s.winrate>=50?'var(--green)':'var(--red)'}">${s.winrate}%</span></div>
-      <div class="stat-row"><span class="stat-row-label">P&L</span><span class="stat-row-val" style="color:${pc}">${s.totalPnl>=0?'+':''}$${s.totalPnl.toFixed(2)}</span></div>
-    </div>`;
+    const wrc=s.winrate>=50?'var(--green)':'var(--red)';
+    const pnlSign=s.totalPnl>=0?'+':'';
+    return '<div class="card" style="margin-bottom:0">'
+      +'<div style="font-size:16px;margin-bottom:8px;">'+(icons[sess]||'')+'<strong>'+sess+'</strong></div>'
+      +'<div class="stat-row"><span class="stat-row-label">Trades</span><span class="stat-row-val">'+s.total+'</span></div>'
+      +'<div class="stat-row"><span class="stat-row-label">Winrate</span><span class="stat-row-val" style="color:'+wrc+'">'+s.winrate+'%</span></div>'
+      +'<div class="stat-row"><span class="stat-row-label">P&L</span><span class="stat-row-val" style="color:'+pc+'">'+pnlSign+'$'+s.totalPnl.toFixed(2)+'</span></div>'
+      +'</div>';
   }).join('');
 }
 
@@ -1827,19 +1879,16 @@ function hashStr(str) {
 
 function checkPw() {
   const val = document.getElementById('pw-input').value.trim();
-  // Direct check (obfuscated)
-  const correct = atob('QWtkLUpUMjAyNg=='); // base64 encoded password
+  const correct = atob('QWtkLUpUMjAyNg==');
   if(val === correct) {
-    localStorage.setItem('tj_access', btoa(correct + '_granted'));
+    localStorage.setItem('tj_access_v2', 'ok');
     document.getElementById('pw-screen').style.display = 'none';
     document.getElementById('pw-error').style.display = 'none';
-    // GA event
     if(typeof gtag !== 'undefined') gtag('event','journal_access',{event_category:'Auth'});
   } else {
-    const errEl = document.getElementById('pw-error');
-    errEl.style.display = 'block';
+    document.getElementById('pw-error').style.display = 'block';
     document.getElementById('pw-input').style.borderColor = 'var(--red)';
-    setTimeout(() => {
+    setTimeout(()=>{
       document.getElementById('pw-input').style.borderColor = '';
     }, 1500);
   }
@@ -1851,12 +1900,20 @@ function togglePwVis() {
 }
 
 function checkAccess() {
-  const stored = localStorage.getItem('tj_access');
-  const correct = atob('QWtkLUpUMjAyNg==');
-  if(stored && atob(stored) === correct + '_granted') {
+  // Check new key first, then migrate from old key if needed
+  if(localStorage.getItem('tj_access_v2') === 'ok') {
     document.getElementById('pw-screen').style.display = 'none';
+    return;
   }
-  // else screen stays visible
+  // Migrate old sessions
+  try {
+    const stored = localStorage.getItem('tj_access');
+    const correct = atob('QWtkLUpUMjAyNg==');
+    if(stored && atob(stored) === correct + '_granted') {
+      localStorage.setItem('tj_access_v2', 'ok');
+      document.getElementById('pw-screen').style.display = 'none';
+    }
+  } catch(e) {}
 }
 
 // Check on load
